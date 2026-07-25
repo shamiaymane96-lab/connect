@@ -42,7 +42,7 @@ or wipe the room's history.
 
 ### Photos and files
 
-Three ways to send, up to 25 MB each, 10 at a time:
+Three ways to send, up to 50 MB each, 10 at a time:
 
 - **＋** in the composer — on a phone this offers the camera and photo library
 - **Paste** an image straight from the clipboard (the fast way to send a screenshot)
@@ -68,6 +68,36 @@ Practically that means:
 
 If you later want this properly locked down, the upgrade is Supabase Auth with a policy of
 `auth.uid() = user_id` — happy to do that, it's maybe 30 lines of change.
+
+## Keeping the backend awake
+
+Supabase pauses free-plan projects after roughly 7 days without user database
+activity. A paused project takes Connect offline — messages stop loading and sending —
+until it is resumed by hand from the dashboard. No data is lost; it is restorable for up
+to a year.
+
+[`.github/workflows/keepalive.yml`](.github/workflows/keepalive.yml) runs a real query
+against the database every other day to prevent that. It needs no secret, since the key it
+uses is the same public one already in `index.html`. You can also run it on demand from the
+repository's **Actions** tab, and it fails loudly if the project is already asleep.
+
+One caveat: GitHub disables scheduled workflows on a repository with no commits for 60
+days. It emails you first, and re-enabling is one click in the Actions tab.
+
+## Where the data lives
+
+| What | Where |
+| --- | --- |
+| Messages | Postgres table `public.messages` |
+| Attachments | Storage bucket `attachments`, at `<room>/<uuid>.<ext>` |
+| Name and room code | `localStorage` on each device |
+| The app shell | Cached by the service worker on each device |
+
+Nothing expires on its own. Data stays until you use **Delete all messages**.
+
+Free-plan headroom: 500 MB database, 1 GB file storage, 50 MB per file, and **5 GB of
+downloads per month**. The last one is the real constraint once images are involved, since
+every view of an image counts again — storage fills up far more slowly than egress does.
 
 ## Local development
 

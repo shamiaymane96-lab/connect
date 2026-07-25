@@ -1,0 +1,39 @@
+# Supabase pauses free-plan projects after ~7 days without user database
+# activity, which would take Connect offline until it is resumed by hand.
+# This runs a real PostgREST query every other day to keep the project awake.
+#
+# The key below is the same publishable anon key already shipped in index.html,
+# so this adds no exposure and needs no repository secret.
+
+name: keepalive
+
+on:
+  schedule:
+    - cron: '17 6 */2 * *'   # 06:17 UTC, every other day
+  workflow_dispatch:          # and on demand, from the Actions tab
+
+permissions: {}
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      SUPABASE_URL: https://sqqqrdqwrqlhfckcaxzz.supabase.co
+      SUPABASE_KEY: sb_publishable_rvhlb3M-TUYiywmgrlw7xg_bv7BpNqo
+    steps:
+      - name: Query the database
+        run: |
+          code=$(curl -sS --max-time 30 -o /tmp/body -w '%{http_code}' \
+            -H "apikey: $SUPABASE_KEY" \
+            -H "Authorization: Bearer $SUPABASE_KEY" \
+            "$SUPABASE_URL/rest/v1/messages?select=id&limit=1")
+
+          echo "HTTP $code"
+          cat /tmp/body
+
+          if [ "$code" != "200" ]; then
+            echo "::error::Keepalive failed — the project may already be paused. Resume it at https://supabase.com/dashboard/project/sqqqrdqwrqlhfckcaxzz"
+            exit 1
+          fi
+          echo "::notice::Project is awake."

@@ -195,7 +195,7 @@ const SUPABASE_URL = 'https://sqqqrdqwrqlhfckcaxzz.supabase.co';
 const SUPABASE_KEY = 'sb_publishable_rvhlb3M-TUYiywmgrlw7xg_bv7BpNqo';
 const HISTORY = 300;
 const BUCKET = 'attachments';
-const MAX_BYTES = 25 * 1024 * 1024;   // matches the bucket's file_size_limit
+const MAX_BYTES = 50 * 1024 * 1024;   // matches the bucket's file_size_limit
 const COLS = 'id,sender,body,created_at,file_path,file_name,file_type,file_size';
 
 const db = createClient(SUPABASE_URL, SUPABASE_KEY, { auth:{ persistSession:false } });
@@ -333,7 +333,7 @@ async function send(body){
 
 async function sendFile(file){
   if (file.size > MAX_BYTES)
-    return toast(`"${file.name}" is ${fmtSize(file.size)} — the limit is 25 MB`);
+    return toast(`"${file.name}" is ${fmtSize(file.size)} — the limit is ${MAX_BYTES / 1048576} MB`);
 
   const ext  = (file.name.match(/\.[A-Za-z0-9]{1,8}$/) || [''])[0].toLowerCase();
   const path = `${room}/${crypto.randomUUID()}${ext}`;
