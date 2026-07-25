@@ -1,0 +1,361 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Connect</title>
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#0e1116">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="apple-touch-icon" href="icon-192.png">
+<style>
+  *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+  :root{
+    --bg:#0e1116; --panel:#161b22; --line:#242c38; --text:#e6edf3;
+    --dim:#8b98a5; --me:#2f6feb; --them:#222b36; --accent:#3fb950;
+  }
+  html,body{height:100%}
+  body{
+    background:var(--bg);color:var(--text);
+    font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    display:flex;flex-direction:column;
+    height:100dvh;overscroll-behavior:none;
+  }
+
+  /* ---------- header ---------- */
+  header{
+    display:flex;align-items:center;gap:10px;
+    padding:calc(env(safe-area-inset-top) + 10px) 14px 10px;
+    background:var(--panel);border-bottom:1px solid var(--line);flex:0 0 auto;
+  }
+  #dot{width:8px;height:8px;border-radius:50%;background:#d29922;flex:0 0 auto;transition:background .3s}
+  #dot.on{background:var(--accent)}
+  #dot.off{background:#f85149}
+  .htitle{font-weight:600;font-size:15px}
+  .hsub{font-size:12px;color:var(--dim);font-variant-numeric:tabular-nums}
+  header .grow{flex:1;min-width:0}
+  .iconbtn{
+    background:none;border:1px solid var(--line);color:var(--dim);
+    width:34px;height:34px;border-radius:9px;font-size:15px;cursor:pointer;flex:0 0 auto;
+  }
+  .iconbtn:active{background:#222b36}
+
+  /* ---------- messages ---------- */
+  #log{
+    flex:1;overflow-y:auto;padding:14px;
+    display:flex;flex-direction:column;gap:8px;
+    -webkit-overflow-scrolling:touch;
+  }
+  .msg{max-width:min(78%,560px);padding:8px 11px;border-radius:14px;word-wrap:break-word;overflow-wrap:anywhere;white-space:pre-wrap}
+  .msg.them{background:var(--them);align-self:flex-start;border-bottom-left-radius:5px}
+  .msg.me{background:var(--me);align-self:flex-end;border-bottom-right-radius:5px}
+  .msg.pending{opacity:.55}
+  .meta{font-size:10.5px;color:var(--dim);margin-bottom:2px;letter-spacing:.02em}
+  .msg.me .meta{color:#c5d9ff;text-align:right}
+  .msg a{color:inherit}
+  .day{align-self:center;font-size:11px;color:var(--dim);padding:2px 10px;background:var(--panel);border-radius:99px;margin:4px 0}
+  .empty{margin:auto;text-align:center;color:var(--dim);font-size:13px;line-height:1.8}
+
+  /* ---------- composer ---------- */
+  form{
+    display:flex;gap:8px;align-items:flex-end;flex:0 0 auto;
+    padding:10px 12px calc(env(safe-area-inset-bottom) + 10px);
+    background:var(--panel);border-top:1px solid var(--line);
+  }
+  textarea{
+    flex:1;resize:none;background:var(--bg);color:var(--text);
+    border:1px solid var(--line);border-radius:12px;padding:10px 12px;
+    font:inherit;max-height:130px;min-height:42px;
+  }
+  textarea:focus{outline:none;border-color:#39435280}
+  #send{
+    background:var(--me);color:#fff;border:0;border-radius:12px;
+    width:42px;height:42px;font-size:17px;cursor:pointer;flex:0 0 auto;
+  }
+  #send:disabled{opacity:.35}
+
+  /* ---------- setup / sheet ---------- */
+  dialog{
+    border:1px solid var(--line);background:var(--panel);color:var(--text);
+    border-radius:16px;padding:20px;width:min(92vw,380px);
+  }
+  dialog::backdrop{background:#000c;backdrop-filter:blur(2px)}
+  dialog h2{font-size:17px;margin-bottom:6px}
+  dialog p{font-size:12.5px;color:var(--dim);margin-bottom:14px}
+  label{display:block;font-size:11.5px;color:var(--dim);margin:12px 0 5px;text-transform:uppercase;letter-spacing:.06em}
+  input[type=text]{
+    width:100%;background:var(--bg);color:var(--text);border:1px solid var(--line);
+    border-radius:10px;padding:10px 12px;font:inherit;
+  }
+  input[type=text]:focus{outline:none;border-color:var(--me)}
+  .row{display:flex;gap:8px}
+  .btn{
+    flex:1;background:var(--me);color:#fff;border:0;border-radius:10px;
+    padding:11px;font:inherit;font-weight:600;cursor:pointer;margin-top:18px;
+  }
+  .btn.ghost{background:#222b36;color:var(--text);font-weight:500}
+  .btn.danger{background:#3d1d1d;color:#ff8f85}
+  .link{
+    font:12px ui-monospace,SFMono-Regular,Consolas,monospace;color:var(--dim);
+    background:var(--bg);border:1px solid var(--line);border-radius:8px;
+    padding:9px;margin-top:8px;word-break:break-all;user-select:all;
+  }
+  .toast{
+    position:fixed;left:50%;transform:translateX(-50%);bottom:calc(env(safe-area-inset-bottom) + 76px);
+    background:#222b36;border:1px solid var(--line);border-radius:99px;
+    padding:8px 16px;font-size:13px;opacity:0;transition:opacity .2s;pointer-events:none;z-index:9;
+  }
+  .toast.show{opacity:1}
+</style>
+</head>
+<body>
+
+<header>
+  <span id="dot" title="connection"></span>
+  <div class="grow">
+    <div class="htitle" id="roomLabel">Connect</div>
+    <div class="hsub" id="status">connecting…</div>
+  </div>
+  <button class="iconbtn" id="btnInfo" title="Room settings">⋯</button>
+</header>
+
+<div id="log"></div>
+<div class="toast" id="toast"></div>
+
+<form id="composer">
+  <textarea id="input" rows="1" placeholder="Message…" autocomplete="off" enterkeyhint="send"></textarea>
+  <button id="send" type="submit" title="Send">↑</button>
+</form>
+
+<!-- first-run setup -->
+<dialog id="setup">
+  <h2>Set up Connect</h2>
+  <p>Use the <b>same room code</b> on your PC and phone. Anyone with the code can read the chat, so keep it private.</p>
+  <label for="fName">Your name on this device</label>
+  <input type="text" id="fName" maxlength="32" placeholder="PC" autocomplete="off">
+  <label for="fRoom">Room code</label>
+  <input type="text" id="fRoom" maxlength="64" autocomplete="off" spellcheck="false">
+  <div class="row">
+    <button class="btn ghost" id="btnGen" type="button">Generate new</button>
+    <button class="btn" id="btnStart" type="button">Start</button>
+  </div>
+</dialog>
+
+<!-- room info / settings -->
+<dialog id="info">
+  <h2>Room</h2>
+  <p>Open this link on your other device to join the same room.</p>
+  <div class="link" id="shareLink"></div>
+  <div class="row">
+    <button class="btn ghost" id="btnCopy" type="button">Copy link</button>
+    <button class="btn ghost" id="btnEdit" type="button">Change</button>
+  </div>
+  <button class="btn danger" id="btnClear" type="button">Delete all messages</button>
+  <button class="btn ghost" id="btnClose" type="button">Close</button>
+</dialog>
+
+<script type="module">
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.47.10';
+
+const SUPABASE_URL = 'https://sqqqrdqwrqlhfckcaxzz.supabase.co';
+const SUPABASE_KEY = 'sb_publishable_rvhlb3M-TUYiywmgrlw7xg_bv7BpNqo';
+const HISTORY = 300;
+
+const db = createClient(SUPABASE_URL, SUPABASE_KEY, { auth:{ persistSession:false } });
+
+const $ = id => document.getElementById(id);
+const log=$('log'), input=$('input'), dot=$('dot'), statusEl=$('status');
+
+let room = '', name = '', channel = null;
+const seen = new Set();
+
+/* ---------- helpers ---------- */
+const randomRoom = () => {
+  const a = new Uint8Array(9); crypto.getRandomValues(a);
+  return [...a].map(b => 'abcdefghijkmnopqrstuvwxyz23456789'[b % 32]).join('');
+};
+const esc = s => s.replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const linkify = s => esc(s).replace(
+  /\bhttps?:\/\/[^\s<]+/g,
+  u => `<a href="${u}" target="_blank" rel="noopener noreferrer">${u}</a>`
+);
+const atBottom = () => log.scrollHeight - log.scrollTop - log.clientHeight < 120;
+const toBottom = () => { log.scrollTop = log.scrollHeight; };
+const time = ts => new Date(ts).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+
+let toastTimer;
+function toast(text){
+  const t = $('toast');
+  t.textContent = text; t.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove('show'), 1800);
+}
+
+function setStatus(state, text){
+  dot.className = state;
+  statusEl.textContent = text;
+}
+
+/* ---------- rendering ---------- */
+function render(m, opts = {}){
+  if (m.id != null){
+    if (seen.has(m.id)) return;
+    seen.add(m.id);
+  }
+  const stick = atBottom();
+  const el = document.createElement('div');
+  el.className = 'msg ' + (m.sender === name ? 'me' : 'them') + (opts.pending ? ' pending' : '');
+  if (opts.tempId) el.dataset.temp = opts.tempId;
+  el.innerHTML = `<div class="meta">${esc(m.sender)} · ${time(m.created_at)}</div>${linkify(m.body)}`;
+  log.append(el);
+  if (stick || m.sender === name) toBottom();
+}
+
+function clearLog(placeholder){
+  seen.clear();
+  log.innerHTML = placeholder
+    ? `<div class="empty">No messages yet.<br>Open the same room code on your other device.</div>`
+    : '';
+}
+
+/* ---------- data ---------- */
+async function loadHistory(){
+  const { data, error } = await db.from('messages')
+    .select('id,sender,body,created_at')
+    .eq('room', room)
+    .order('created_at', { ascending:false })
+    .limit(HISTORY);
+
+  if (error){ setStatus('off', 'load failed — ' + error.message); return; }
+  clearLog(data.length === 0);
+  data.reverse().forEach(m => render(m));
+  toBottom();
+}
+
+function subscribe(){
+  if (channel) db.removeChannel(channel);
+  channel = db.channel('room:' + room)
+    .on('postgres_changes',
+        { event:'INSERT', schema:'public', table:'messages', filter:'room=eq.' + room },
+        p => {
+          const m = p.new;
+          // drop the optimistic bubble this echoes, then render the real row
+          const temp = log.querySelector(`[data-temp="${CSS.escape(m.sender + '|' + m.body)}"]`);
+          if (temp) temp.remove();
+          if (log.querySelector('.empty')) clearLog(false);
+          render(m);
+        })
+    .on('postgres_changes',
+        { event:'DELETE', schema:'public', table:'messages' },
+        () => loadHistory())
+    .subscribe(s => {
+      if (s === 'SUBSCRIBED')       setStatus('on',  'live · ' + room);
+      else if (s === 'CLOSED')      setStatus('',    'reconnecting…');
+      else if (s === 'CHANNEL_ERROR' || s === 'TIMED_OUT') setStatus('off', 'connection lost');
+    });
+}
+
+async function send(body){
+  const tempId = name + '|' + body;
+  render({ sender:name, body, created_at:Date.now() }, { pending:true, tempId });
+  if (log.querySelector('.empty')) log.querySelector('.empty').remove();
+
+  const { error } = await db.from('messages').insert({ room, sender:name, body });
+  if (error){
+    const el = log.querySelector(`[data-temp="${CSS.escape(tempId)}"]`);
+    if (el){ el.classList.remove('pending'); el.style.background = '#5c2323'; }
+    toast('Not sent: ' + error.message);
+  }
+}
+
+/* ---------- composer ---------- */
+const autosize = () => { input.style.height = 'auto'; input.style.height = input.scrollHeight + 'px'; };
+input.addEventListener('input', autosize);
+
+input.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing){
+    e.preventDefault();
+    $('composer').requestSubmit();
+  }
+});
+
+$('composer').addEventListener('submit', e => {
+  e.preventDefault();
+  const body = input.value.trim();
+  if (!body || !room) return;
+  input.value = ''; autosize(); input.focus();
+  send(body);
+});
+
+/* ---------- dialogs ---------- */
+function shareUrl(){
+  return location.origin + location.pathname + '?r=' + encodeURIComponent(room);
+}
+
+function openSetup(){
+  $('fName').value = name || (/Android|iPhone|iPad/i.test(navigator.userAgent) ? 'Phone' : 'PC');
+  $('fRoom').value = room || randomRoom();
+  $('setup').showModal();
+  setTimeout(() => $('fName').select(), 50);
+}
+
+$('btnGen').onclick   = () => { $('fRoom').value = randomRoom(); };
+$('btnStart').onclick = () => {
+  const n = $('fName').value.trim(), r = $('fRoom').value.trim().toLowerCase();
+  if (!n) return toast('Pick a name');
+  if (r.length < 6) return toast('Room code needs 6+ characters');
+  name = n; room = r;
+  localStorage.setItem('connect.name', name);
+  localStorage.setItem('connect.room', room);
+  $('setup').close();
+  start();
+};
+
+$('btnInfo').onclick  = () => { $('shareLink').textContent = shareUrl(); $('info').showModal(); };
+$('btnClose').onclick = () => $('info').close();
+$('btnEdit').onclick  = () => { $('info').close(); openSetup(); };
+
+$('btnCopy').onclick = async () => {
+  try { await navigator.clipboard.writeText(shareUrl()); toast('Link copied'); }
+  catch { toast('Select the link and copy it'); }
+};
+
+$('btnClear').onclick = async () => {
+  if (!confirm('Delete every message in this room? This cannot be undone.')) return;
+  const { error } = await db.from('messages').delete().eq('room', room);
+  if (error) return toast('Failed: ' + error.message);
+  $('info').close();
+  clearLog(true);
+  toast('Room cleared');
+};
+
+/* ---------- boot ---------- */
+function start(){
+  $('roomLabel').textContent = 'Connect · ' + name;
+  setStatus('', 'connecting…');
+  loadHistory().then(subscribe);
+}
+
+// reconnect + refresh when the app comes back to the foreground
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && room) loadHistory();
+});
+window.addEventListener('online',  () => { if (room) start(); });
+window.addEventListener('offline', () => setStatus('off', 'offline'));
+
+const urlRoom = new URLSearchParams(location.search).get('r');
+if (urlRoom){
+  localStorage.setItem('connect.room', urlRoom.toLowerCase());
+  history.replaceState(null, '', location.pathname);
+}
+name = localStorage.getItem('connect.name') || '';
+room = localStorage.getItem('connect.room') || '';
+
+if (name && room) start(); else openSetup();
+
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');
+</script>
+</body>
+</html>
