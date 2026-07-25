@@ -51,6 +51,29 @@ Three ways to send, up to 50 MB each, 10 at a time:
 Images, video and audio play inline. Anything else shows as a download chip with its size.
 Wiping a room deletes its uploaded files too, so nothing is left stranded in storage.
 
+Photos are **downscaled before upload** — re-encoded to WebP with a 2048px long edge. A
+typical phone photo shrinks around 5–7×, which matters because egress, not storage, is the
+quota you actually run into. GIFs, SVGs, small images, and anything that would come out
+larger are sent untouched, and a browser that can't decode the format falls back to the
+original rather than failing.
+
+The service worker also caches attachments, so scrolling back through history costs
+egress once rather than every time.
+
+### Messages
+
+- **Tap** a message to copy its text
+- **Long-press** (or right-click) to delete just that one, on both devices
+- **Scroll up** to page in older messages, 60 at a time
+- Messages are grouped under Today / Yesterday / date headers
+
+### Sending offline
+
+Text typed with no connection is held in `localStorage` and sent when you reconnect —
+it survives closing the app entirely. The header shows a queued count while anything is
+waiting. Files are the exception: they need a live connection and say so rather than
+failing quietly.
+
 ## Security model — read this
 
 There is no login. **The room code is the only secret.** Anyone who has it can read and post

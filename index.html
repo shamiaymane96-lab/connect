@@ -58,6 +58,7 @@
   .msg.them{background:var(--them);align-self:flex-start;border-bottom-left-radius:5px}
   .msg.me{background:var(--me);align-self:flex-end;border-bottom-right-radius:5px}
   .msg.pending{opacity:.55}
+  .msg.queued{opacity:.75;box-shadow:inset 0 0 0 1px #ffffff40}
   .meta{font-size:10.5px;color:var(--dim);margin-bottom:2px;letter-spacing:.02em}
   .msg.me .meta{color:#c5d9ff;text-align:right}
   .msg a{color:inherit}
@@ -112,6 +113,7 @@
   dialog::backdrop{background:#000c;backdrop-filter:blur(2px)}
   dialog h2{font-size:17px;margin-bottom:6px}
   dialog p{font-size:12.5px;color:var(--dim);margin-bottom:14px}
+  dialog p.hint{margin:18px 0 0;padding-top:14px;border-top:1px solid var(--line);font-size:12px}
   label{display:block;font-size:11.5px;color:var(--dim);margin:12px 0 5px;text-transform:uppercase;letter-spacing:.06em}
   input[type=text]{
     width:100%;background:var(--bg);color:var(--text);border:1px solid var(--line);
@@ -184,6 +186,8 @@
     <button class="btn ghost" id="btnCopy" type="button">Copy link</button>
     <button class="btn ghost" id="btnEdit" type="button">Change</button>
   </div>
+  <p class="hint">Tap a message to copy its text. Long-press it (or right-click) to delete
+  just that one. Scroll up to load older messages.</p>
   <button class="btn danger" id="btnClear" type="button">Delete all messages</button>
   <button class="btn ghost" id="btnClose" type="button">Close</button>
 </dialog>
@@ -193,10 +197,13 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.47.10';
 
 const SUPABASE_URL = 'https://sqqqrdqwrqlhfckcaxzz.supabase.co';
 const SUPABASE_KEY = 'sb_publishable_rvhlb3M-TUYiywmgrlw7xg_bv7BpNqo';
-const HISTORY = 300;
 const BUCKET = 'attachments';
 const MAX_BYTES = 50 * 1024 * 1024;   // matches the bucket's file_size_limit
 const COLS = 'id,sender,body,created_at,file_path,file_name,file_type,file_size';
+const PAGE = 60;                      // messages per history page
+const IMG_MAX_DIM = 2048;             // long edge, in px, after downscaling
+const IMG_QUALITY = 0.82;
+const IMG_SKIP_UNDER = 512 * 1024;    // small images aren't worth re-encoding
 
 const db = createClient(SUPABASE_URL, SUPABASE_KEY, { auth:{ persistSession:false } });
 
@@ -223,6 +230,48 @@ const fmtSize = b =>
   b < 1024 ? b + ' B' : b < 1048576 ? Math.round(b/1024) + ' KB' : (b/1048576).toFixed(1) + ' MB';
 const publicUrl = p => db.storage.from(BUCKET).getPublicUrl(p).data.publicUrl;
 
+const dayKey = ts => { const d = new Date(ts); return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`; };
+const dayLabel = ts => {
+  const d = new Date(ts);
+  if (dayKey(d) === dayKey(Date.now()))            return 'Today';
+  if (dayKey(d) === dayKey(Date.now() - 864e5))    return 'Yesterday';
+  return d.toLocaleDateString([], { weekday:'short', day:'numeric', month:'short' });
+};
+
+// A phone photo is several MB, and egress is the tightest quota on the free plan —
+// every view of an image spends it again. Re-encoding to WebP at a sane size
+// typically cuts that severalfold. Anything that can't be safely re-encoded, or
+// that would come out larger, is sent untouched.
+async function shrinkImage(file){
+  if (!file.type.startsWith('image/'))     return file;
+  if (file.type === 'image/gif')           return file;   // would lose animation
+  if (file.type === 'image/svg+xml')       return file;   // vector, already small
+  if (file.size < IMG_SKIP_UNDER)          return file;
+
+  let bmp;
+  try { bmp = await createImageBitmap(file); }
+  catch { return file; }                                  // e.g. a HEIC this browser can't decode
+
+  try {
+    const scale = Math.min(1, IMG_MAX_DIM / Math.max(bmp.width, bmp.height));
+    if (scale === 1 && file.size < 2 * 1024 * 1024) return file;
+
+    const w = Math.round(bmp.width * scale), h = Math.round(bmp.height * scale);
+    const canvas = document.createElement('canvas');
+    canvas.width = w; canvas.height = h;
+    canvas.getContext('2d').drawImage(bmp, 0, 0, w, h);
+
+    const blob = await new Promise(r => canvas.toBlob(r, 'image/webp', IMG_QUALITY));
+    if (!blob || blob.size >= file.size) return file;      // never make it worse
+
+    return new File([blob], file.name.replace(/\.[^.]+$/, '') + '.webp', { type:'image/webp' });
+  } catch {
+    return file;
+  } finally {
+    bmp.close();
+  }
+}
+
 let toastTimer;
 function toast(text){
   const t = $('toast');
@@ -231,9 +280,72 @@ function toast(text){
   toastTimer = setTimeout(() => t.classList.remove('show'), 1800);
 }
 
+let statusBase = '';
 function setStatus(state, text){
   dot.className = state;
-  statusEl.textContent = text;
+  statusBase = text;
+  paintStatus();
+}
+function paintStatus(){
+  const n = readQueue().length;
+  statusEl.textContent = statusBase + (n ? ` · ${n} queued` : '');
+}
+
+/* ---------- offline queue ---------- */
+// Text typed with no connection is held in localStorage rather than lost, and
+// flushed on reconnect. Survives a reload and a closed app.
+const QUEUE_KEY = 'connect.queue';
+const readQueue = () => { try { return JSON.parse(localStorage.getItem(QUEUE_KEY)) || []; } catch { return []; } };
+const writeQueue = q => { localStorage.setItem(QUEUE_KEY, JSON.stringify(q)); paintStatus(); };
+
+// A constraint violation carries a PostgREST code and would never succeed on
+// retry; a dropped connection does not. Only the latter is worth queueing.
+const isNetworkError = err => !err.code || /fetch|network|load failed/i.test(err.message || '');
+
+function enqueue(el, body){
+  const q = readQueue();
+  q.push({ id: crypto.randomUUID(), room, sender:name, body, at: Date.now() });
+  writeQueue(q);
+  if (el){
+    el.classList.remove('pending');
+    el.classList.add('queued');
+    el.querySelector('.meta').textContent = `${name} · queued`;
+  }
+}
+
+let flushing = false;
+async function flushQueue(){
+  if (flushing || !navigator.onLine) return;
+  const q = readQueue();
+  if (!q.length) return;
+
+  flushing = true;
+  const stuck = [];
+  let sent = 0;
+  for (const item of q){
+    // Ask for the row back and render it here rather than waiting for the realtime
+    // echo: this runs the moment the channel reports SUBSCRIBED, and the changes
+    // feed can still be catching up at that point, which would drop the echo.
+    // render() dedupes on id, so a late echo is harmless.
+    const { data, error } = await db.from('messages')
+      .insert({ room:item.room, sender:item.sender, body:item.body })
+      .select(COLS)
+      .single();
+
+    if (!error){
+      sent++;
+      if (data && item.room === room){
+        if (log.querySelector('.empty')) clearLog(false);
+        render(data);
+      }
+    }
+    else if (isNetworkError(error)) stuck.push(item);   // still offline: keep for later
+    // a server rejection is dropped — retrying it forever would never help
+  }
+  if (sent) refreshDays();
+  writeQueue(stuck);
+  flushing = false;
+  if (sent) toast(`Sent ${sent} queued message${sent > 1 ? 's' : ''}`);
 }
 
 /* ---------- rendering ---------- */
@@ -245,7 +357,9 @@ function attachmentHtml(m){
   const type = m.file_type || '';
   const nm = esc(m.file_name || 'file');
   if (type.startsWith('image/'))
-    return `<a href="${url}" target="_blank" rel="noopener noreferrer"><img class="att" src="${url}" alt="${nm}" loading="lazy"></a>`;
+    // crossorigin makes this a CORS request, so the service worker gets a real
+    // inspectable response to cache instead of an opaque one
+    return `<a href="${url}" target="_blank" rel="noopener noreferrer"><img class="att" src="${url}" alt="${nm}" loading="lazy" crossorigin="anonymous"></a>`;
   if (type.startsWith('video/'))
     return `<video class="att" src="${url}" controls preload="metadata"></video>`;
   if (type.startsWith('audio/'))
@@ -262,14 +376,39 @@ function render(m, opts = {}){
   const el = document.createElement('div');
   el.className = 'msg ' + (m.sender === name ? 'me' : 'them') + (opts.pending ? ' pending' : '');
   if (opts.tempId) el.dataset.temp = opts.tempId;
+  if (m.id != null) el.dataset.id = m.id;
+  if (m.file_path)  el.dataset.file = m.file_path;
+  el.dataset.day = dayKey(m.created_at);
+  el.dataset.ts  = new Date(m.created_at).getTime();
   el.innerHTML =
     `<div class="meta">${esc(m.sender)} · ${time(m.created_at)}</div>` +
     (m.body ? `<span class="txt">${linkify(m.body)}</span>` : '') +
     attachmentHtml(m);
+
+  if (opts.prepend){ log.prepend(el); return el; }
+
   log.append(el);
-  if (stick || m.sender === name) toBottom();
-  // images change height after load, so keep the view pinned while they arrive
-  if (stick || m.sender === name) el.querySelectorAll('img.att').forEach(i => i.onload = toBottom);
+  if (stick || m.sender === name){
+    toBottom();
+    // images change height after load, so keep the view pinned while they arrive
+    el.querySelectorAll('img.att').forEach(i => i.onload = toBottom);
+  }
+  return el;
+}
+
+// Date dividers are recomputed wholesale rather than patched, so paging in older
+// messages can't leave a stale or duplicated header behind.
+function refreshDays(){
+  log.querySelectorAll('.day').forEach(e => e.remove());
+  let current = null;
+  for (const el of log.querySelectorAll('.msg')){
+    if (!el.dataset.day || el.dataset.day === current) continue;
+    current = el.dataset.day;
+    const d = document.createElement('div');
+    d.className = 'day';
+    d.textContent = dayLabel(Number(el.dataset.ts));
+    el.before(d);
+  }
 }
 
 function clearLog(placeholder){
@@ -280,19 +419,47 @@ function clearLog(placeholder){
 }
 
 /* ---------- data ---------- */
-async function loadHistory(){
-  const { data, error } = await db.from('messages')
-    .select(COLS)
-    .eq('room', room)
-    .order('created_at', { ascending:false })
-    .order('id', { ascending:false })   // tiebreak: same-millisecond rows must not shuffle
-    .limit(HISTORY);
+let oldestId = null, loadingOlder = false, allLoaded = false;
 
+const page = query => query
+  .select(COLS)
+  .eq('room', room)
+  .order('created_at', { ascending:false })
+  .order('id', { ascending:false })   // tiebreak: same-millisecond rows must not shuffle
+  .limit(PAGE);
+
+async function loadHistory(){
+  const { data, error } = await page(db.from('messages'));
   if (error){ setStatus('off', 'load failed — ' + error.message); return; }
+
   clearLog(data.length === 0);
-  data.reverse().forEach(m => render(m));
+  oldestId   = data.length ? data[data.length - 1].id : null;
+  allLoaded  = data.length < PAGE;
+  data.slice().reverse().forEach(m => render(m));
+  refreshDays();
   toBottom();
 }
+
+// `id` is monotonic and agrees with created_at ordering, so it works as a keyset
+// cursor without needing a compound comparison.
+async function loadOlder(){
+  if (loadingOlder || allLoaded || oldestId == null) return;
+  loadingOlder = true;
+
+  const { data, error } = await page(db.from('messages')).lt('id', oldestId);
+  loadingOlder = false;
+  if (error) return toast('Could not load older messages');
+  if (!data.length){ allLoaded = true; return; }
+
+  const before = log.scrollHeight;
+  data.forEach(m => render(m, { prepend:true }));   // desc order + prepend = ascending on top
+  oldestId  = data[data.length - 1].id;
+  allLoaded = data.length < PAGE;
+  refreshDays();
+  log.scrollTop += log.scrollHeight - before;       // hold the reader's place
+}
+
+log.addEventListener('scroll', () => { if (log.scrollTop < 150) loadOlder(); });
 
 function subscribe(){
   if (channel) db.removeChannel(channel);
@@ -307,12 +474,19 @@ function subscribe(){
           if (temp) temp.remove();
           if (log.querySelector('.empty')) clearLog(false);
           render(m);
+          refreshDays();
         })
     .on('postgres_changes',
         { event:'DELETE', schema:'public', table:'messages' },
-        () => loadHistory())
+        p => {
+          // Realtime reduces DELETE payloads to the primary key, so there is no
+          // room to filter on. It doesn't matter: ids are globally unique, so an
+          // id present in this room's DOM necessarily belongs to this room, and
+          // one that isn't is a no-op.
+          if (p.old?.id != null) dropMessage(p.old.id);
+        })
     .subscribe(s => {
-      if (s === 'SUBSCRIBED')       setStatus('on',  'live · ' + room);
+      if (s === 'SUBSCRIBED'){      setStatus('on',  'live · ' + room); flushQueue(); }
       else if (s === 'CLOSED')      setStatus('',    'reconnecting…');
       else if (s === 'CHANNEL_ERROR' || s === 'TIMED_OUT') setStatus('off', 'connection lost');
     });
@@ -322,34 +496,60 @@ async function send(body){
   const tempId = name + '|' + body;
   render({ sender:name, body, created_at:Date.now() }, { pending:true, tempId });
   if (log.querySelector('.empty')) log.querySelector('.empty').remove();
+  refreshDays();
+
+  const el = () => log.querySelector(`[data-temp="${CSS.escape(tempId)}"]`);
+
+  if (!navigator.onLine){
+    enqueue(el(), body);
+    return toast('Offline — queued');
+  }
 
   const { error } = await db.from('messages').insert({ room, sender:name, body });
-  if (error){
-    const el = log.querySelector(`[data-temp="${CSS.escape(tempId)}"]`);
-    if (el){ el.classList.remove('pending'); el.style.background = '#5c2323'; }
-    toast('Not sent: ' + error.message);
+  if (!error) return;
+
+  if (isNetworkError(error)){
+    enqueue(el(), body);
+    return toast('Connection lost — queued');
   }
+  const bad = el();
+  if (bad){ bad.classList.remove('pending'); bad.style.background = '#5c2323'; }
+  toast('Not sent: ' + error.message);
 }
 
-async function sendFile(file){
-  if (file.size > MAX_BYTES)
-    return toast(`"${file.name}" is ${fmtSize(file.size)} — the limit is ${MAX_BYTES / 1048576} MB`);
+async function sendFile(original){
+  // Files aren't queued — holding 50 MB blobs in storage waiting for a network
+  // is a different problem. Say so plainly rather than failing vaguely.
+  if (!navigator.onLine)
+    return toast('Offline — files can only be sent while connected');
 
-  const ext  = (file.name.match(/\.[A-Za-z0-9]{1,8}$/) || [''])[0].toLowerCase();
-  const path = `${room}/${crypto.randomUUID()}${ext}`;
-  const type = file.type || 'application/octet-stream';
-
-  // optimistic bubble keyed on the storage path, which the realtime echo carries back
+  // The bubble goes up first: shrinking a large photo takes a moment and the
+  // tap should feel like it did something.
   const el = document.createElement('div');
   el.className = 'msg me pending';
-  el.dataset.temp = path;
-  el.innerHTML = `<div class="meta">${esc(name)} · uploading</div>` +
-                 `<span class="txt">${esc(file.name)}</span><div class="bar"><i></i></div>`;
+  el.dataset.day = dayKey(Date.now());
+  el.dataset.ts  = Date.now();
+  el.innerHTML = `<div class="meta">${esc(name)} · preparing</div>` +
+                 `<span class="txt">${esc(original.name)}</span><div class="bar"><i></i></div>`;
   const placeholder = log.querySelector('.empty');
   if (placeholder) placeholder.remove();
   log.append(el); toBottom();
 
   const fail = msg => { el.classList.remove('pending'); el.style.background = '#5c2323'; toast(msg); };
+
+  const file = await shrinkImage(original);
+  if (file.size > MAX_BYTES){
+    el.remove();
+    return toast(`"${original.name}" is ${fmtSize(file.size)} — the limit is ${MAX_BYTES / 1048576} MB`);
+  }
+
+  const ext  = (file.name.match(/\.[A-Za-z0-9]{1,8}$/) || [''])[0].toLowerCase();
+  const path = `${room}/${crypto.randomUUID()}${ext}`;
+  const type = file.type || 'application/octet-stream';
+
+  // keyed on the storage path, which the realtime echo carries back
+  el.dataset.temp = path;
+  el.querySelector('.meta').textContent = `${name} · uploading`;
 
   const up = await db.storage.from(BUCKET).upload(path, file, { contentType:type, upsert:false });
   if (up.error) return fail('Upload failed: ' + up.error.message);
@@ -364,6 +564,46 @@ async function sendFile(file){
   }
   el.remove();   // the realtime echo renders the real row
 }
+
+/* ---------- per-message actions ---------- */
+function dropMessage(id){
+  const el = log.querySelector(`.msg[data-id="${CSS.escape(String(id))}"]`);
+  if (el) el.remove();
+  seen.delete(Number(id));
+  refreshDays();
+  if (!log.querySelector('.msg')) clearLog(true);
+}
+
+async function deleteMessage(el){
+  const id = el.dataset.id;
+  if (!id || !confirm('Delete this message?')) return;
+
+  const { error } = await db.from('messages').delete().eq('id', id);
+  if (error) return toast('Failed: ' + error.message);
+  if (el.dataset.file) await db.storage.from(BUCKET).remove([el.dataset.file]);
+  dropMessage(id);
+  toast('Deleted');
+}
+
+// Tap to copy — the whole point of this app is shuttling text between devices,
+// and selecting it by hand on a phone is miserable.
+log.addEventListener('click', e => {
+  if (e.target.closest('a, img, video, audio')) return;   // let media and links behave normally
+  const el = e.target.closest('.msg');
+  const txt = el && !el.classList.contains('pending') && el.querySelector('.txt');
+  if (!txt) return;
+  navigator.clipboard.writeText(txt.innerText)
+    .then(() => toast('Copied'))
+    .catch(() => toast('Could not copy'));
+});
+
+// Right-click on desktop and long-press on mobile both raise contextmenu.
+log.addEventListener('contextmenu', e => {
+  const el = e.target.closest('.msg');
+  if (!el || !el.dataset.id) return;
+  e.preventDefault();
+  deleteMessage(el);
+});
 
 async function handleFiles(list){
   if (!room) return;
@@ -498,9 +738,9 @@ function start(){
 
 // reconnect + refresh when the app comes back to the foreground
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible' && room) loadHistory();
+  if (document.visibilityState === 'visible' && room){ loadHistory(); flushQueue(); }
 });
-window.addEventListener('online',  () => { if (room) start(); });
+window.addEventListener('online',  () => { if (room) start(); flushQueue(); });
 window.addEventListener('offline', () => setStatus('off', 'offline'));
 
 const urlRoom = new URLSearchParams(location.search).get('r');
