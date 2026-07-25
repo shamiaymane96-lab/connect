@@ -16,6 +16,9 @@ Messages go into a single `messages` table in Supabase. Each device subscribes t
 Supabase Realtime filtered on the **room code**, so an insert on one device shows up on the
 other in well under a second. Everything else is plain DOM.
 
+Attachments go to a Supabase Storage bucket (`attachments`) under `<room>/<uuid>.<ext>`, and
+the message row carries the path plus name, MIME type and size.
+
 The backend is already set up on project `sqqqrdqwrqlhfckcaxzz`:
 
 ```sql
@@ -37,6 +40,17 @@ create table public.messages (
 Enter sends, Shift+Enter makes a new line. **⋯** shows the share link, lets you change room,
 or wipe the room's history.
 
+### Photos and files
+
+Three ways to send, up to 25 MB each, 10 at a time:
+
+- **＋** in the composer — on a phone this offers the camera and photo library
+- **Paste** an image straight from the clipboard (the fast way to send a screenshot)
+- **Drag and drop** files anywhere on the window
+
+Images, video and audio play inline. Anything else shows as a download chip with its size.
+Wiping a room deletes its uploaded files too, so nothing is left stranded in storage.
+
 ## Security model — read this
 
 There is no login. **The room code is the only secret.** Anyone who has it can read and post
@@ -44,8 +58,11 @@ in that room, and the anon key in `index.html` is public by design (that's what 
 
 Practically that means:
 
-- Use a generated code, not `family` or `aymane`. The generator gives ~45 bits of entropy.
+- Use a generated code, not `family` or `aymane123`. The generator gives ~45 bits of entropy.
 - Don't put passwords, card numbers, or anything you'd mind leaking in here.
+- The storage bucket is **public**: an attachment URL works for anyone who has it, forever,
+  even after the message is deleted. The paths are random UUIDs so they can't be guessed, but
+  treat a file you send here as something you've published to an unlisted URL.
 - Supabase's linter flags the `insert`/`delete` policies as permissive. That is deliberate for
   a no-auth app, and it is the accepted tradeoff for this design.
 
