@@ -60,6 +60,13 @@ original rather than failing.
 The service worker also caches attachments, so scrolling back through history costs
 egress once rather than every time.
 
+Uploads show a live percentage. `supabase-js` uploads through `fetch`, which reports no
+progress at all, so the upload call is a plain `XMLHttpRequest` against the same Storage
+endpoint — everything else still goes through the client library. The bar shows a shimmer
+while an image is being re-encoded (no percentage exists yet), then switches to a real one,
+and holds at 99% until the server confirms rather than claiming completion at the moment
+the last byte leaves.
+
 ### Messages
 
 - **Tap** a message to copy its text

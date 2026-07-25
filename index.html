@@ -77,7 +77,9 @@
   .att-file .nm{display:block;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:210px}
   .att-file .sz{display:block;font-size:11px;opacity:.75}
   .bar{height:3px;border-radius:2px;background:#ffffff2e;margin-top:7px;overflow:hidden}
-  .bar i{display:block;height:100%;width:40%;background:#fff;animation:slide 1.1s ease-in-out infinite}
+  .bar i{display:block;height:100%;width:0;background:#fff;transition:width .15s linear}
+  /* used while shrinking, when there is no percentage to show yet */
+  .bar.indet i{width:40%;transition:none;animation:slide 1.1s ease-in-out infinite}
   @keyframes slide{0%{transform:translateX(-110%)}100%{transform:translateX(260%)}}
   #drop{
     position:fixed;inset:10px;z-index:20;pointer-events:none;display:none;
@@ -517,6 +519,35 @@ async function send(body){
   toast('Not sent: ' + error.message);
 }
 
+// supabase-js uploads through fetch, which reports no upload progress at all.
+// This is the same Storage endpoint it targets, driven by XHR so the bubble can
+// show a real percentage. Resolves rather than rejects so callers stay flat.
+function uploadWithProgress(path, file, onProgress){
+  return new Promise(resolve => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', `${SUPABASE_URL}/storage/v1/object/${BUCKET}/${path}`, true);
+    xhr.setRequestHeader('apikey', SUPABASE_KEY);
+    xhr.setRequestHeader('Authorization', `Bearer ${SUPABASE_KEY}`);
+    xhr.setRequestHeader('x-upsert', 'false');
+    // paths carry a UUID and are never reused, so these are safe to cache hard
+    xhr.setRequestHeader('cache-control', 'max-age=31536000');
+    xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
+
+    xhr.upload.onprogress = e => { if (e.lengthComputable) onProgress(e.loaded / e.total); };
+
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) return resolve({ ok:true });
+      let message = `upload failed (HTTP ${xhr.status})`;
+      try { message = JSON.parse(xhr.responseText).message || message; } catch {}
+      resolve({ ok:false, message });
+    };
+    xhr.onerror = () => resolve({ ok:false, message:'network error' });
+    xhr.onabort = () => resolve({ ok:false, message:'cancelled' });
+
+    xhr.send(file);
+  });
+}
+
 async function sendFile(original){
   // Files aren't queued — holding 50 MB blobs in storage waiting for a network
   // is a different problem. Say so plainly rather than failing vaguely.
@@ -530,7 +561,8 @@ async function sendFile(original){
   el.dataset.day = dayKey(Date.now());
   el.dataset.ts  = Date.now();
   el.innerHTML = `<div class="meta">${esc(name)} · preparing</div>` +
-                 `<span class="txt">${esc(original.name)}</span><div class="bar"><i></i></div>`;
+                 `<span class="txt">${esc(original.name)} · ${fmtSize(original.size)}</span>` +
+                 `<div class="bar indet"><i></i></div>`;
   const placeholder = log.querySelector('.empty');
   if (placeholder) placeholder.remove();
   log.append(el); toBottom();
@@ -549,10 +581,25 @@ async function sendFile(original){
 
   // keyed on the storage path, which the realtime echo carries back
   el.dataset.temp = path;
-  el.querySelector('.meta').textContent = `${name} · uploading`;
 
-  const up = await db.storage.from(BUCKET).upload(path, file, { contentType:type, upsert:false });
-  if (up.error) return fail('Upload failed: ' + up.error.message);
+  const meta = el.querySelector('.meta');
+  const bar  = el.querySelector('.bar');
+  const fill = el.querySelector('.bar i');
+  el.querySelector('.txt').textContent = `${file.name} · ${fmtSize(file.size)}`;
+  bar.classList.remove('indet');          // switch from shimmer to a real percentage
+  meta.textContent = `${name} · 0%`;
+
+  const up = await uploadWithProgress(path, file, frac => {
+    // held at 99 until the server actually answers: bytes handed to the socket
+    // are not the same thing as bytes stored
+    const pct = Math.min(99, Math.round(frac * 100));
+    fill.style.width = pct + '%';
+    meta.textContent = `${name} · ${pct}%`;
+  });
+  if (!up.ok) return fail('Upload failed: ' + up.message);
+
+  fill.style.width = '100%';
+  meta.textContent = `${name} · finishing`;
 
   const { error } = await db.from('messages').insert({
     room, sender:name, body:'',
