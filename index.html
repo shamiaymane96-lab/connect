@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,interactive-widget=resizes-content">
 <title>Connect</title>
 <link rel="manifest" href="manifest.webmanifest">
 <meta name="theme-color" content="#0e1116">
@@ -16,12 +16,17 @@
     --bg:#0e1116; --panel:#161b22; --line:#242c38; --text:#e6edf3;
     --dim:#8b98a5; --me:#2f6feb; --them:#222b36; --accent:#3fb950;
   }
-  html,body{height:100%}
+  html{height:100%;overflow:hidden}
+  /* Pinned to the viewport rather than flowing in the page: when the phone
+     keyboard opens, JS sets the height from visualViewport so the composer
+     stays put and the message list shrinks instead of scrolling out of sight. */
   body{
+    position:fixed;top:0;left:0;right:0;
+    height:100dvh;                       /* fallback until the JS below runs */
     background:var(--bg);color:var(--text);
     font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
     display:flex;flex-direction:column;
-    height:100dvh;overscroll-behavior:none;
+    overflow:hidden;overscroll-behavior:none;
   }
 
   /* ---------- header ---------- */
@@ -149,8 +154,8 @@
 
 <form id="composer">
   <input type="file" id="file" multiple hidden>
-  <button class="iconbtn" id="btnAttach" type="button" title="Attach photos or files">＋</button>
   <textarea id="input" rows="1" placeholder="Message…" autocomplete="off" enterkeyhint="send"></textarea>
+  <button class="iconbtn" id="btnAttach" type="button" title="Attach photos or files">＋</button>
   <button id="send" type="submit" title="Send">↑</button>
 </form>
 
@@ -280,6 +285,7 @@ async function loadHistory(){
     .select(COLS)
     .eq('room', room)
     .order('created_at', { ascending:false })
+    .order('id', { ascending:false })   // tiebreak: same-millisecond rows must not shuffle
     .limit(HISTORY);
 
   if (error){ setStatus('off', 'load failed — ' + error.message); return; }
@@ -457,6 +463,31 @@ $('btnClear').onclick = async () => {
   clearLog(true);
   toast('Room cleared');
 };
+
+/* ---------- keyboard-aware sizing ---------- */
+// The on-screen keyboard shrinks the *visual* viewport but not the layout one,
+// so a 100dvh body would keep its full height and push the chat off-screen.
+// Track visualViewport instead and keep the view pinned to the newest message.
+const vv = window.visualViewport;
+if (vv){
+  let raf = 0;
+  const fit = () => {
+    cancelAnimationFrame(raf);
+    raf = requestAnimationFrame(() => {
+      const stick = atBottom();
+      document.body.style.height = vv.height + 'px';
+      // iOS scrolls the page itself to reveal the focused field; undo that
+      window.scrollTo(0, 0);
+      if (stick) toBottom();
+    });
+  };
+  vv.addEventListener('resize', fit);
+  vv.addEventListener('scroll', fit);
+  fit();
+}
+
+// opening the keyboard should land you at the latest message, not mid-history
+input.addEventListener('focus', () => setTimeout(toBottom, 300));
 
 /* ---------- boot ---------- */
 function start(){
