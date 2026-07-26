@@ -463,9 +463,13 @@ async function loadOlder(){
 
 log.addEventListener('scroll', () => { if (log.scrollTop < 150) loadOlder(); });
 
+let chanGen = 0, retryCount = 0, retryTimer = null;
+
 function subscribe(){
+  clearTimeout(retryTimer);
+  const gen = ++chanGen;              // callbacks from a replaced channel are ignored
   if (channel) db.removeChannel(channel);
-  channel = db.channel('room:' + room)
+  channel = db.channel(`room:${room}:${gen}`)
     .on('postgres_changes',
         { event:'INSERT', schema:'public', table:'messages', filter:'room=eq.' + room },
         p => {
@@ -488,10 +492,28 @@ function subscribe(){
           if (p.old?.id != null) dropMessage(p.old.id);
         })
     .subscribe(s => {
-      if (s === 'SUBSCRIBED'){      setStatus('on',  'live · ' + room); flushQueue(); }
-      else if (s === 'CLOSED')      setStatus('',    'reconnecting…');
-      else if (s === 'CHANNEL_ERROR' || s === 'TIMED_OUT') setStatus('off', 'connection lost');
+      if (gen !== chanGen) return;   // stale channel being torn down; not our problem
+
+      if (s === 'SUBSCRIBED'){
+        const recovered = retryCount > 0;
+        retryCount = 0;
+        setStatus('on', 'live · ' + room);
+        flushQueue();
+        if (recovered) loadHistory();   // catch up on whatever arrived while we were down
+        return;
+      }
+      if (s === 'CHANNEL_ERROR' || s === 'TIMED_OUT' || s === 'CLOSED') retrySubscribe();
     });
+}
+
+// A long upload can saturate the uplink for minutes, which is enough to starve the
+// realtime heartbeat and drop the socket. Previously that parked on "connection
+// lost" forever; now it backs off and rejoins.
+function retrySubscribe(){
+  clearTimeout(retryTimer);
+  const wait = Math.min(30000, 1000 * 2 ** retryCount++);
+  setStatus('', 'reconnecting…');
+  retryTimer = setTimeout(() => { if (room) subscribe(); }, wait);
 }
 
 async function send(body){
@@ -507,8 +529,21 @@ async function send(body){
     return toast('Offline — queued');
   }
 
-  const { error } = await db.from('messages').insert({ room, sender:name, body });
-  if (!error) return;
+  const { data, error } = await db.from('messages')
+    .insert({ room, sender:name, body })
+    .select(COLS)
+    .single();
+
+  if (!error){
+    // Render from the insert response rather than waiting for the realtime echo.
+    // If the socket is down the echo never comes, and the bubble would sit greyed
+    // out as though it failed even though the message was saved.
+    const temp = el();
+    if (temp) temp.remove();
+    render(data);
+    refreshDays();
+    return;
+  }
 
   if (isNetworkError(error)){
     enqueue(el(), body);
@@ -601,15 +636,21 @@ async function sendFile(original){
   fill.style.width = '100%';
   meta.textContent = `${name} · finishing`;
 
-  const { error } = await db.from('messages').insert({
+  const { data, error } = await db.from('messages').insert({
     room, sender:name, body:'',
     file_path:path, file_name:file.name.slice(0, 200), file_type:type, file_size:file.size
-  });
+  }).select(COLS).single();
+
   if (error){
     await db.storage.from(BUCKET).remove([path]);   // don't leave an orphan behind
     return fail('Not sent: ' + error.message);
   }
-  el.remove();   // the realtime echo renders the real row
+
+  // A big upload is exactly when the socket is most likely to have dropped, so
+  // render the row we just got back instead of trusting the echo to arrive.
+  el.remove();
+  render(data);
+  refreshDays();
 }
 
 /* ---------- per-message actions ---------- */
