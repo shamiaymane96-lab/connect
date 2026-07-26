@@ -65,6 +65,29 @@
   .day{align-self:center;font-size:11px;color:var(--dim);padding:2px 10px;background:var(--panel);border-radius:99px;margin:4px 0}
   .empty{margin:auto;text-align:center;color:var(--dim);font-size:13px;line-height:1.8}
 
+  /* ---------- selection mode ---------- */
+  body.selecting #log{user-select:none;-webkit-user-select:none}
+  body.selecting .msg{position:relative;padding-left:38px;cursor:pointer}
+  body.selecting .msg::before{
+    content:'';position:absolute;left:11px;top:50%;transform:translateY(-50%);
+    width:19px;height:19px;border-radius:50%;border:2px solid #ffffff70;
+    display:flex;align-items:center;justify-content:center;
+    font-size:12px;font-weight:700;line-height:1;
+  }
+  body.selecting .msg.sel::before{
+    content:'✓';background:#fff;border-color:#fff;color:#14181f;
+  }
+  body.selecting .msg.pending::before{opacity:.3}   /* can't select an in-flight upload */
+  #selbar{
+    display:none;align-items:center;gap:12px;flex:0 0 auto;
+    padding:10px 12px calc(env(safe-area-inset-bottom) + 10px);
+    background:var(--panel);border-top:1px solid var(--line);
+  }
+  body.selecting #selbar{display:flex}
+  body.selecting form{display:none}
+  #selCount{flex:1;font-size:14px;font-weight:600}
+  .iconbtn.danger{color:#ff8f85;border-color:#5c2a2a}
+
   /* ---------- attachments ---------- */
   .att{display:block;max-width:100%;border-radius:10px;margin-top:4px}
   img.att{max-height:340px;cursor:zoom-in;background:#00000040}
@@ -173,6 +196,12 @@
   <button id="send" type="submit" title="Send">↑</button>
 </form>
 
+<div id="selbar">
+  <button class="iconbtn" id="selCancel" type="button" title="Cancel">✕</button>
+  <span id="selCount">1 selected</span>
+  <button class="iconbtn danger" id="selDelete" type="button" title="Delete selected">🗑</button>
+</div>
+
 <div id="drop">Drop files to send</div>
 
 <!-- first-run setup -->
@@ -198,8 +227,9 @@
     <button class="btn ghost" id="btnCopy" type="button">Copy link</button>
     <button class="btn ghost" id="btnEdit" type="button">Change</button>
   </div>
-  <p class="hint">Tap a message to copy its text. Long-press it (or right-click) to delete
-  just that one. Scroll up to load older messages.</p>
+  <p class="hint">Tap a message to copy its text. Long-press it (or right-click) to start
+  selecting — then tap any others and delete them together. Scroll up to load older
+  messages.</p>
   <button class="btn ghost" id="btnReload" type="button">Reload app</button>
   <button class="btn danger" id="btnClear" type="button">Delete all messages</button>
   <button class="btn ghost" id="btnClose" type="button">Close</button>
@@ -459,6 +489,7 @@ async function loadHistory(){
   allLoaded  = data.length < PAGE;
   data.slice().reverse().forEach(m => render(m));
   inFlight.forEach(el => log.append(el));
+  restoreSelection();          // a reconnect mid-selection must not lose the ticks
   refreshDays();
   toBottom();
 }
@@ -478,6 +509,7 @@ async function loadOlder(){
   data.forEach(m => render(m, { prepend:true }));   // desc order + prepend = ascending on top
   oldestId  = data[data.length - 1].id;
   allLoaded = data.length < PAGE;
+  restoreSelection();
   refreshDays();
   log.scrollTop += log.scrollHeight - before;       // hold the reader's place
 }
@@ -690,26 +722,84 @@ function dropMessage(id){
   const el = log.querySelector(`.msg[data-id="${CSS.escape(String(id))}"]`);
   if (el) el.remove();
   seen.delete(Number(id));
+  selected.delete(String(id));            // may have been deleted from the other device
+  if (selecting && !selected.size) exitSelect(); else updateSelBar();
   refreshDays();
   if (!log.querySelector('.msg')) clearLog(true);
 }
 
-async function deleteMessage(el){
-  const id = el.dataset.id;
-  if (!id || !confirm('Delete this message?')) return;
+/* ---------- selection mode ---------- */
+// Long-press opens selection rather than deleting outright, so several messages
+// can go at once. Ids map to their storage path, so a file can still be cleaned
+// up even if its bubble scrolled out of the loaded page.
+let selecting = false;
+const selected = new Map();
 
-  const { error } = await db.from('messages').delete().eq('id', id);
-  if (error) return toast('Failed: ' + error.message);
-  if (el.dataset.file) await db.storage.from(BUCKET).remove([el.dataset.file]);
-  dropMessage(id);
-  toast('Deleted');
+function updateSelBar(){
+  $('selCount').textContent = `${selected.size} selected`;
 }
 
+function enterSelect(el){
+  selecting = true;
+  document.body.classList.add('selecting');
+  selected.clear();
+  toggleSelect(el);
+}
+
+function restoreSelection(){
+  if (!selecting) return;
+  for (const el of log.querySelectorAll('.msg'))
+    if (el.dataset.id && selected.has(el.dataset.id)) el.classList.add('sel');
+}
+
+function exitSelect(){
+  selecting = false;
+  document.body.classList.remove('selecting');
+  selected.clear();
+  log.querySelectorAll('.msg.sel').forEach(e => e.classList.remove('sel'));
+}
+
+function toggleSelect(el){
+  const id = el?.dataset.id;
+  if (!id) return;
+  if (selected.has(id)){ selected.delete(id); el.classList.remove('sel'); }
+  else { selected.set(id, el.dataset.file || null); el.classList.add('sel'); }
+  if (!selected.size) return exitSelect();   // clearing the last one leaves the mode
+  updateSelBar();
+}
+
+$('selCancel').onclick = exitSelect;
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && selecting) exitSelect(); });
+
+$('selDelete').onclick = async () => {
+  const ids = [...selected.keys()];
+  const paths = [...selected.values()].filter(Boolean);
+  if (!ids.length) return;
+  if (!confirm(`Delete ${ids.length} message${ids.length > 1 ? 's' : ''}?`)) return;
+
+  const { error } = await db.from('messages').delete().in('id', ids.map(Number));
+  if (error) return toast('Failed: ' + error.message);
+  if (paths.length) await db.storage.from(BUCKET).remove(paths);
+
+  const n = ids.length;
+  ids.forEach(dropMessage);
+  exitSelect();
+  toast(`Deleted ${n}`);
+};
+
 // Tap to copy — the whole point of this app is shuttling text between devices,
-// and selecting it by hand on a phone is miserable.
+// and selecting it by hand on a phone is miserable. In selection mode the same
+// tap toggles the checkbox instead.
 log.addEventListener('click', e => {
-  if (e.target.closest('a, img, video, audio')) return;   // let media and links behave normally
   const el = e.target.closest('.msg');
+
+  if (selecting){
+    e.preventDefault();                 // don't follow links or open images while selecting
+    toggleSelect(el);
+    return;
+  }
+
+  if (e.target.closest('a, img, video, audio')) return;   // let media and links behave normally
   const txt = el && !el.classList.contains('pending') && el.querySelector('.txt');
   if (!txt) return;
   navigator.clipboard.writeText(txt.innerText)
@@ -722,7 +812,7 @@ log.addEventListener('contextmenu', e => {
   const el = e.target.closest('.msg');
   if (!el || !el.dataset.id) return;
   e.preventDefault();
-  deleteMessage(el);
+  selecting ? toggleSelect(el) : enterSelect(el);
 });
 
 async function handleFiles(list){
