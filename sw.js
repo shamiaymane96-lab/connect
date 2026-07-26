@@ -1,6 +1,6 @@
 // Caches the app shell so Connect opens instantly and survives a dropped network.
 // Message data is never cached — it always comes from Supabase.
-const CACHE = 'connect-v3';
+const CACHE = 'connect-v5';
 const MEDIA = 'connect-media-v1';   // uploaded attachments, kept separate so the
 const MEDIA_MAX = 150;              // shell can be versioned without dropping them
 const SHELL = [
@@ -70,8 +70,17 @@ self.addEventListener('fetch', e => {
   // next launch instead of being pinned to whatever was cached at install time.
   if (e.request.mode === 'navigate' || e.request.destination === 'document'){
     e.respondWith(
-      fetch(e.request)
+      // Fetch by URL, not by passing e.request with an init: building a Request from
+      // a navigate-mode Request with a non-empty init throws synchronously, which
+      // would skip respondWith entirely and silently disable this whole handler.
+      // no-store matters because a plain fetch can be answered by the browser HTTP
+      // cache (the host sends max-age=600), rendering an older page than the update
+      // check measures, so the two could never agree.
+      fetch(e.request.url, { cache: 'no-store', credentials: 'same-origin' })
         .then(res => {
+          // Only a real page is worth keeping. Caching a 404 or 502 here would pin
+          // an error page as the app shell — the same trap in a different coat.
+          if (!res.ok) throw new Error('bad status ' + res.status);
           const copy = res.clone();
           caches.open(CACHE).then(c => c.put('./index.html', copy));
           return res;
@@ -80,6 +89,11 @@ self.addEventListener('fetch', e => {
     );
     return;
   }
+
+  // Cache-busted URLs are unique by construction, so caching them only grows the
+  // cache with entries that can never be hit again — the update check's ?probe=
+  // requests would accumulate one per check forever.
+  if (url.search) return;
 
   // Everything else (icons, the Supabase client bundle) is cache-first.
   e.respondWith(

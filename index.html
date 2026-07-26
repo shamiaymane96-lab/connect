@@ -6,6 +6,9 @@
 <title>Connect</title>
 <link rel="manifest" href="manifest.webmanifest">
 <meta name="theme-color" content="#0e1116">
+<!-- Stamped at deploy time by stamp.py. Compared against the deployed copy to
+     detect a stale app; left as "dev" locally, which disables the check. -->
+<meta name="build" content="20260726-1228-4c304fc">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -920,26 +923,42 @@ $('btnClear').onclick = async () => {
 // forever with no way to fetch it. Compare the ETag of index.html against the
 // one this page booted with. HEAD isn't intercepted by the service worker
 // (it only handles GET), so this always reflects the server.
-let bootTag = null;
+// Compare the build id baked into *these* bytes against the one in the deployed
+// copy. An earlier version recorded a baseline by asking the server at boot, which
+// is subtly useless: a page served from cache would record the server's current id
+// as its own, match forever, and never report the staleness it exists to catch.
+// A page cannot read the ETag of its own navigation, so the id has to be in the file.
+const BUILD = document.querySelector('meta[name=build]')?.content || 'dev';
 
-async function liveTag(){
-  try {
-    const r = await fetch('index.html', { method:'HEAD', cache:'no-store' });
-    return r.ok ? (r.headers.get('etag') || r.headers.get('last-modified')) : null;
-  } catch { return null; }        // offline: nothing to say
-}
+let lastCheck = 0, checking = false;
 
 async function checkForUpdate(){
-  const tag = await liveTag();
-  if (!tag) return;
-  if (!bootTag){ bootTag = tag; return; }   // first run just records the baseline
-  if (tag !== bootTag) $('update').classList.add('show');
+  if (BUILD === 'dev' || checking) return;   // running from source, nothing to compare
+  // The probe is a full page fetch and resuming can happen often, so rate-limit it.
+  if (Date.now() - lastCheck < 5 * 60 * 1000) return;
+  checking = true;
+  try {
+    const r = await fetch('index.html?probe=' + Date.now(), { cache:'no-store' });
+    if (r.ok){
+      // Only a probe that actually completed counts against the rate limit —
+      // otherwise a device that was offline stays muted after it reconnects.
+      lastCheck = Date.now();
+      const deployed = (await r.text()).match(/<meta name="build" content="([^"]*)">/);
+      if (deployed && deployed[1] !== BUILD) $('update').classList.add('show');
+    }
+  } catch { /* offline: nothing to say */ }
+  finally { checking = false; }
 }
 
-const reloadApp = () => {
+let swReg = null;
+
+const reloadApp = async () => {
   if (log.querySelector('.msg.pending') &&
       !confirm('An upload is still going. Reload anyway and lose it?')) return;
-  location.reload();
+  try { await swReg?.update(); } catch {}
+  // A plain reload can be answered by a stale worker from cache. A URL the old
+  // cache has no entry for cannot be, so this actually reaches the network.
+  location.replace(location.pathname + '?fresh=' + Date.now());
 };
 $('update').onclick = reloadApp;
 $('btnReload').onclick = reloadApp;
@@ -983,22 +1002,28 @@ function start(){
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState !== 'visible') return;
   checkForUpdate();                 // resuming the PWA is the moment to notice a deploy
+  swReg?.update().catch(() => {});  // and to let the worker itself refresh
   if (room){ loadHistory(); flushQueue(); }
 });
 window.addEventListener('online',  () => { if (room) start(); flushQueue(); });
 window.addEventListener('offline', () => setStatus('off', 'offline'));
 
 const urlRoom = new URLSearchParams(location.search).get('r');
-if (urlRoom){
-  localStorage.setItem('connect.room', urlRoom.toLowerCase());
-  history.replaceState(null, '', location.pathname);
-}
+if (urlRoom) localStorage.setItem('connect.room', urlRoom.toLowerCase());
+// clears ?r= and the ?fresh= cache-buster reloadApp adds
+if (location.search) history.replaceState(null, '', location.pathname);
 name = localStorage.getItem('connect.name') || '';
 room = localStorage.getItem('connect.room') || '';
 
 if (name && room) start(); else openSetup();
 
-if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');
+if ('serviceWorker' in navigator){
+  // updateViaCache:'none' keeps the browser HTTP cache from answering for sw.js
+  // itself, which would otherwise keep an outdated worker alive past a deploy.
+  navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' })
+    .then(reg => { swReg = reg; })
+    .catch(() => {});
+}
 </script>
 </body>
 </html>
