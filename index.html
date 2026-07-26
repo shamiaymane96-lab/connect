@@ -338,6 +338,9 @@ async function flushQueue(){
       sent++;
       if (data && item.room === room){
         if (log.querySelector('.empty')) clearLog(false);
+        // queued bubbles now survive a history reload, so retire this one by hand
+        const temp = log.querySelector(`[data-temp="${CSS.escape(item.sender + '|' + item.body)}"]`);
+        if (temp) temp.remove();
         render(data);
       }
     }
@@ -434,10 +437,17 @@ async function loadHistory(){
   const { data, error } = await page(db.from('messages'));
   if (error){ setStatus('off', 'load failed — ' + error.message); return; }
 
-  clearLog(data.length === 0);
+  // An upload in flight exists only as a DOM node. Any reload during one — the
+  // socket reconnecting, or switching apps and back — used to wipe it, so the
+  // progress bubble vanished and the file appeared from nowhere when it landed.
+  // Detach and re-attach them instead.
+  const inFlight = [...log.querySelectorAll('.msg.pending, .msg.queued')];
+
+  clearLog(data.length === 0 && inFlight.length === 0);
   oldestId   = data.length ? data[data.length - 1].id : null;
   allLoaded  = data.length < PAGE;
   data.slice().reverse().forEach(m => render(m));
+  inFlight.forEach(el => log.append(el));
   refreshDays();
   toBottom();
 }
@@ -463,12 +473,14 @@ async function loadOlder(){
 
 log.addEventListener('scroll', () => { if (log.scrollTop < 150) loadOlder(); });
 
-let chanGen = 0, retryCount = 0, retryTimer = null;
+let chanGen = 0, retryCount = 0, retryTimer = null, joinTimer = null;
 
 function subscribe(){
-  clearTimeout(retryTimer);
+  clearTimeout(retryTimer); clearTimeout(joinTimer);
   const gen = ++chanGen;              // callbacks from a replaced channel are ignored
-  if (channel) db.removeChannel(channel);
+  if (channel){ try { db.removeChannel(channel); } catch {} }
+
+  try {
   channel = db.channel(`room:${room}:${gen}`)
     .on('postgres_changes',
         { event:'INSERT', schema:'public', table:'messages', filter:'room=eq.' + room },
@@ -495,6 +507,7 @@ function subscribe(){
       if (gen !== chanGen) return;   // stale channel being torn down; not our problem
 
       if (s === 'SUBSCRIBED'){
+        clearTimeout(joinTimer);
         const recovered = retryCount > 0;
         retryCount = 0;
         setStatus('on', 'live · ' + room);
@@ -504,13 +517,21 @@ function subscribe(){
       }
       if (s === 'CHANNEL_ERROR' || s === 'TIMED_OUT' || s === 'CLOSED') retrySubscribe();
     });
+  } catch {
+    // Joining over an already-dead socket throws synchronously, which used to
+    // escape here and strand the app on "connecting…" with no realtime at all.
+    return retrySubscribe();
+  }
+
+  // Nor is a status callback guaranteed to arrive. Don't wait on it forever.
+  joinTimer = setTimeout(() => { if (gen === chanGen) retrySubscribe(); }, 15000);
 }
 
 // A long upload can saturate the uplink for minutes, which is enough to starve the
 // realtime heartbeat and drop the socket. Previously that parked on "connection
 // lost" forever; now it backs off and rejoins.
 function retrySubscribe(){
-  clearTimeout(retryTimer);
+  clearTimeout(retryTimer); clearTimeout(joinTimer);
   const wait = Math.min(30000, 1000 * 2 ** retryCount++);
   setStatus('', 'reconnecting…');
   retryTimer = setTimeout(() => { if (room) subscribe(); }, wait);
